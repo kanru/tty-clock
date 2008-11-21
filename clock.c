@@ -23,6 +23,7 @@
 #include <ncurses.h>
 #include <unistd.h>
 #include <getopt.h>	 
+#include <signal.h>
 
 #define printh() printf("tty-clock usage : tty-clock -[option] -[option] <arg>\n\n\
   -s, --second		 Show seconds\n\
@@ -41,6 +42,8 @@ push S for enable the second and T for enable the 12H hours format.\n");\
 #define XLENGTH 5
 #define YLENGTH 52
 #define DEPTHB -1
+
+int iscenter = 0;
 
 void start(void);
 void check_key(bool);
@@ -238,6 +241,7 @@ check_key(bool keylock) {
 			case KEY_UP:
 			case 'k':
 			case 'K':
+				iscenter = 0;
 				if(defx > 1) 
 					--defx;
 					clear();
@@ -245,6 +249,7 @@ check_key(bool keylock) {
 			case KEY_DOWN:
 			case 'j':
 			case 'J':
+				iscenter = 0;
 				if(defx + XLENGTH + 2 < maxcol) 
 					++defx;
 					clear();
@@ -252,6 +257,7 @@ check_key(bool keylock) {
 			case KEY_LEFT:
 			case 'h':
 			case 'H':
+				iscenter = 0;
 				if(defy > 1) 
 					--defy;
 					clear();
@@ -259,6 +265,7 @@ check_key(bool keylock) {
 			case KEY_RIGHT:	 
 			case 'l':
 			case 'L':
+					iscenter = 0;
 				if(defy + YLENGTH - SCHANGE + 1 < maxlin) 
 				++defy;
 				clear();
@@ -274,6 +281,8 @@ check_key(bool keylock) {
 					clear();
 					option.second = 0;
 				}
+				if (iscenter)
+					set_center();
 				break;
 			case 't':
 			case 'T':
@@ -284,6 +293,8 @@ check_key(bool keylock) {
 					clear();
 					option.twelve = 0;
 				}
+				if (iscenter)
+					set_center();
 				break;
 			case 'c':
 			case 'C':
@@ -345,12 +356,13 @@ get_time(void) {
 
 void
 set_center(void) {
+	iscenter = 1;
 	start();
 	maxcol = getmaxy(stdscr);
 	maxlin = getmaxx(stdscr);
 	
-	defy = maxlin / 2 - SCHANGE + 3;
-	defx = maxcol / 2 - XLENGTH + 2;
+	defy = (maxlin - YLENGTH + SCHANGE) / 2;
+	defx = (maxcol - XLENGTH) / 2;
 }
 
 /* *********** */
@@ -363,10 +375,21 @@ run(void) {
 	arrange_clock(sdate.hour[0], sdate.hour[1],
 					sdate.minute[0], sdate.minute[1],
 					sdate.second[0], sdate.second[1]);
+	refresh();
 	maxcol = getmaxy(stdscr);
 	maxlin = getmaxx(stdscr);
-	refresh();
 	halfdelay(1);
+}
+
+void
+winch_cb(int n) {
+	endwin();
+	start();
+    run();
+	if (iscenter) {
+        clear();
+		set_center();
+    }
 }
 
 /* ************ */
@@ -377,6 +400,8 @@ int
 main(int argc,char **argv) {
 	int c;
 	option.keylock = 1;
+
+	signal(SIGWINCH, winch_cb);
 
 	while ((c = getopt_long(argc,argv,"tx:y:vsbcih",
 			long_options,NULL)) != -1) {
