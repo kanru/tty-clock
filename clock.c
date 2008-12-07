@@ -29,42 +29,44 @@
  *      (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  *      OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 #include <stdlib.h>
 #include <time.h>
+#include <signal.h>
 #include <ncurses.h>
 #include <unistd.h>
 #include <getopt.h>
 
-#include <signal.h>
+#define HELPSTR "tty-clock usage : tty-clock -[option] -[option] <arg>\n\n\
+  -s, --second           Show seconds                                 \n \
+  -b, --block            Lock the keyboard                            \n \
+  -c, --center           Set the clock at the center of the terminal  \n \
+  -t, --tw               Set the hour in 12h format                   \n \
+  -x  <integer>          Set the clock to X                           \n \
+  -y  <integer>          Set the clock to Y                           \n \
+  -v, --version          Show tty-clock version                       \n \
+  -i, --info             Show some info about tty-clock               \n \
+  -h, --help             Show this page                             \n\n \
+Try keypad arrow for move the clock :-)                               \n \
+push S for enable the second and T for enable the 12H hours format.\n"
 
-#define printh() printf("tty-clock usage : tty-clock -[option] -[option] <arg>\n\n\
-  -s, --second		 Show seconds\n                                 \
-  -b, --block        	 Lock the keyboard\n                            \
-  -c, --center		 Set the clock at the center of the terminal\n  \
-  -t, --tw		 Set the hour in 12h format\n                   \
-  -x  <integer>		 Set the clock to X\n                           \
-  -y  <integer>		 Set the clock to Y\n                           \
-  -v, --version		 Show tty-clock version\n                       \
-  -i, --info		 Show some info about tty-clock\n               \
-  -h, --help		 Show this page\n\n                             \
-Try keypad arrow for move the clock :-)\n                               \
-push S for enable the second and T for enable the 12H hours format.\n");\
+#define LGNUM   30
+#define DIFFSEC 19
+#define DEPTHB  -1
+#define MAXW    getmaxx(stdscr)
+#define MAXH    getmaxy(stdscr)
 
-#define LGNUM 30
-#define DEPTHB -1
-#define MAXW getmaxx(stdscr)
-#define MAXH getmaxy(stdscr)
+typedef enum { False, True } Bool;
 
 void start(void);
-void check_key(bool);
+void check_key(Bool);
 void get_time(void);
 void set_center(void);
+void handle_sig(int);
 void run(void);
 
-/* *************** */
 /* BIG NUMBER INIT */
-/* *************** */
-static const bool number[10][LGNUM] =
+static const Bool number[][LGNUM] =
 {
      {1,1,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,1,1}, /* 0 */
      {0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,1,1}, /* 1 */
@@ -78,27 +80,25 @@ static const bool number[10][LGNUM] =
      {1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1,0,0,0,0,1,1,1,1,1,1,1,1}  /* 9 */
 };
 
-/* ************* */
 /* VARIABLE INIT */
-/* ************* */
 static struct option long_options[] =
 {
      {"help",    0, NULL, 'h'},
      {"version", 0, NULL, 'v'},
-     {"info",	 0, NULL, 'i'},
+     {"info",    0, NULL, 'i'},
      {"second",  0, NULL, 's'},
      {"twelve",  0, NULL, 't'},
-     {"block",	 0, NULL, 'b'},
-     {"center",	 0, NULL, 'c'},
-     {NULL,	 0, NULL, 0}
+     {"block",   0, NULL, 'b'},
+     {"center",  0, NULL, 'c'},
+     {NULL,      0, NULL, 0}
 };
 
 typedef struct
 {
-     bool second;
-     bool twelve;
-     bool keylock;
-     bool center;
+     Bool second;
+     Bool twelve;
+     Bool keylock;
+     Bool center;
 } option_t;
 
 typedef struct
@@ -119,92 +119,76 @@ typedef struct
      unsigned int year;
 } date_t;
 
-option_t option;
-geo_t geo = {1, 1, 33, 5}; /* Base position of the clock */
+option_t option = { False, False, True };
+geo_t geo = { 1, 1, 33, 5 }; /* Base position of the clock */
+Bool running = True;
 date_t sdate;
 char *meridiem;
-int temp_dp;
-int bg;
-
+int bg, i;
 struct tm *tm;
 time_t lt;
 
-/* ***************** */
+
 /* STARTING FUNCTION */
-/* ***************** */
 void
 start(void)
 {
+     struct sigaction sig;
+
+     /* Init curses stuff */
      initscr();
      noecho();
      keypad(stdscr, TRUE);
      start_color();
      refresh();
-     bg = (use_default_colors() == OK) ? -1 : COLOR_BLACK;
+     bg = (use_default_colors() == OK) ? -1 : COLOR_BLACK; /* -1 = default term bg */
+     init_pair(0, bg, bg);
      init_pair(1, COLOR_BLACK, COLOR_GREEN);
-     init_pair(2, bg, bg);
-     init_pair(3, COLOR_GREEN, bg);
+     init_pair(2, COLOR_GREEN, bg);
      curs_set(0);
      clear();
+
+     /* Set signal handle */
+     sig.sa_handler = handle_sig;
+     sig.sa_flags = 0;
+     sigaction(SIGWINCH, &sig, NULL);
+     sigaction(SIGTERM, &sig, NULL);
+     sigaction(SIGINT, &sig, NULL);
 }
 
-/* **************************** */
 /* BIG NUMBER PRINTING FUNCTION */
-/* **************************** */
 void
 print_number(int num, int x, int y)
 {
-     int i, u, count = 0;
-     int tab[LGNUM];
-     int lx = x, ly = y;
-     char c;
+     int sy = y;
 
-     for(u = 0; u < LGNUM; ++u)
-          tab[u] = number[num][u];
-
-     for(i = 0; i < LGNUM; ++i)
+     for(i = 0; i < LGNUM; ++i, ++sy)
      {
-          c = (tab[i] != 1) ? 2 : 1;
-
-          if(count == 6)
+          if(sy == y + 6)
           {
-               ++lx;
-               ly = y;
-               count = 0;
+               sy = y;
+               ++x;
           }
-          move(lx, ly);
-          attron(COLOR_PAIR(c));
+          move(x, sy);
+          attron(COLOR_PAIR(number[num][i]));
           addch(' ');
-          attroff(COLOR_PAIR(c));
-          ++ly;
-          ++count;
+          attroff(COLOR_PAIR(number[num][i]));
      }
+
 }
 
-
-/* ******************************** */
 /* ARRANGE FINAL POSITION OF NUMBER */
-/* ******************************** */
-
 void
 arrange_clock(int h1, int h2,
               int m1, int m2,
               int s1, int s2)
 {
-     int i;
-
-     temp_dp = (option.second) ? 21 : 12;
-
      print_number(h1, geo.x, geo.y);
      print_number(h2, geo.x, geo.y + 7);
 
      attron(COLOR_PAIR(1));
-
-     move(geo.x + 1, geo.y + 15);
-     printw("%s", meridiem);
-     move(geo.x + 3, geo.y + 15);
-     printw("  ");
-
+     mvaddstr(geo.x + 1, geo.y + 15, "  ");
+     mvaddstr(geo.x + 3, geo.y + 15, "  ");
      attroff(COLOR_PAIR(1));
 
      print_number(m1, geo.x, geo.y + 19);
@@ -213,8 +197,8 @@ arrange_clock(int h1, int h2,
      if(option.second)
      {
           attron(COLOR_PAIR(1));
-          mvaddstr(geo.x + 1, geo.y + 34,"  ");
-          mvaddstr(geo.x + 3, geo.y + 34,"  ");
+          mvaddstr(geo.x + 1, geo.y + 34, "  ");
+          mvaddstr(geo.x + 3, geo.y + 34, "  ");
           attroff(COLOR_PAIR(1));
 
           print_number(s1, geo.x, geo.y + 38);
@@ -240,72 +224,79 @@ arrange_clock(int h1, int h2,
      mvaddch(geo.x + DEPTHB,     geo.y + geo.width, ACS_URCORNER);
      mvaddch(geo.x + geo.height, geo.y + geo.width, ACS_LRCORNER);
 
-     move(geo.x + geo.height + 1, geo.y + temp_dp);
-     attron(COLOR_PAIR(3));
-     printw("%d/%d/%d",
+     /* Print the date */
+     move(geo.x + geo.height + 1, geo.y + ((option.second) ? 21 : 12));
+     attron(COLOR_PAIR(2));
+     printw("%.2d/%.2d/%d %s",
             sdate.month_day,
             sdate.month,
-            sdate.year);
-     attroff(COLOR_PAIR(3));
+            sdate.year,
+            meridiem);
+     attroff(COLOR_PAIR(2));
 }
 
-/* ********************* */
 /* KEY CHECKING FUNCTION */
-/* ********************* */
 void
-check_key(bool keylock)
+check_key(Bool keylock)
 {
-     int c;
-
      if(!keylock)
           return;
 
-     c = getch();
-
-     switch(c)
+     switch(getch())
      {
      case KEY_UP:
      case 'k':
      case 'K':
-          if(geo.x > 1)
-               --geo.x;
-          option.center = 0;
-          clear();
+          if(!option.center)
+          {
+               if(geo.x > 1)
+                    --geo.x;
+               clear();
+          }
           break;
      case KEY_DOWN:
      case 'j':
      case 'J':
-          if(geo.x + geo.height + 2 < MAXH)
-               ++geo.x;
-          option.center = 0;
-          clear();
+          if(!option.center)
+          {
+               if(geo.x + geo.height + 2 < MAXH)
+                    ++geo.x;
+               clear();
+          }
           break;
      case KEY_LEFT:
      case 'h':
      case 'H':
-          if(geo.y > 1)
-               --geo.y;
-          option.center = 0;
-          clear();
+          if(!option.center)
+          {
+               if(geo.y > 1)
+                    --geo.y;
+               clear();
+          }
           break;
      case KEY_RIGHT:
      case 'l':
      case 'L':
-          if(geo.y + geo.width + 1 < MAXW)
-               ++geo.y;
-          option.center = 0;
-          clear();
+          if(!option.center)
+          {
+               if(geo.y + geo.width + 1 < MAXW)
+                    ++geo.y;
+               clear();
+          }
           break;
      case 's':
      case 'S':
           if(!option.second)
-               geo.width += 19;
+               geo.width += DIFFSEC;
           else
-               geo.width -= 19;
+               geo.width -= DIFFSEC;
           clear();
-          if (option.center)
-              set_center();
           option.second = !option.second;
+          if(option.center)
+          {
+               option.center = False;
+               set_center();
+          }
           break;
      case 't':
      case 'T':
@@ -316,34 +307,28 @@ check_key(bool keylock)
      case 'C':
           clear();
           set_center();
-          option.center = 1;
           break;
      case 'q':
      case 'Q':
-          endwin();
-          exit(EXIT_SUCCESS);
+          running = False;
           break;
      }
 }
 
-/* ********************* */
 /* GETTING TIME FUNCTION */
-/* ********************* */
 void
 get_time(void)
 {
      int ihour;
+
      tm = localtime(&lt);
      lt = time(NULL);
-
      ihour = tm->tm_hour;
 
-     if (option.twelve && ihour > 12)
-          meridiem = "PM";
-     else if (option.twelve && ihour < 12)
-          meridiem = "AM";
+     if(option.twelve)
+          meridiem = (ihour > 12) ? "(PM)" : "(AM)";
      else
-          meridiem = "  ";
+          meridiem = " ";
 
      ihour = (option.twelve && ihour > 12) ? ihour - 12 : ihour;
      ihour = (option.twelve && !ihour) ? 12 : ihour;
@@ -365,19 +350,36 @@ get_time(void)
      }
 }
 
-/* ******************* */
 /* SET CENTER FUNCTION */
-/* ******************* */
 void
 set_center(void)
 {
-     geo.y = MAXW / 2 - ((geo.width) / 2);
-     geo.x = MAXH / 2 - (geo.height / 2);
+     if(!option.center)
+     {
+          geo.y = MAXW / 2 - (geo.width / 2);
+          geo.x = MAXH / 2 - (geo.height / 2);
+          option.center = True;
+     }
+     else
+          option.center = !option.center;
 }
 
-/* *********** */
+/* SIGNAL HANDLE FUNCTION */
+void
+handle_sig(int num)
+{
+     if(num == SIGWINCH && option.center)
+     {
+          endwin();
+          start();
+          option.center = !option.center;
+          set_center();
+     }
+     else if(num == SIGINT || num == SIGTERM)
+          running = False;
+}
+
 /* RUN FUCTION */
-/* *********** */
 void
 run(void)
 {
@@ -389,30 +391,12 @@ run(void)
      halfdelay(1);
 }
 
-/* ***************** */
-/* SIGwINCH CALLBACK */
-/* ***************** */
-void
-winch_cb(int n)
-{
-     if (option.center) {
-         endwin();
-         start();
-         set_center();
-     }
-}
-
-/* ************ */
 /* MAIN FUCTION */
-/* ************ */
 
 int
 main(int argc, char **argv)
 {
      int c;
-     option.keylock = 1;
-
-     signal(SIGWINCH, winch_cb);
 
      while ((c = getopt_long(argc,argv,"tx:y:vsbcih",
                              long_options, NULL)) != -1)
@@ -421,50 +405,37 @@ main(int argc, char **argv)
           {
           case 'h':
           default:
-               printh();
+               printf(HELPSTR);
                exit(EXIT_SUCCESS);
                break;
           case 'i':
-               printf("TTY-Clock ,Martin Duquesnoy© (xorg62@gmail.com)\n");
+               printf("TTY-Clock by Martin Duquesnoy (xorg62@gmail.com)\n");
                exit(EXIT_SUCCESS);
                break;
           case 'v':
-               printf("TTY-Clock v0.1.4\n");
+               printf("TTY-Clock devel\n");
                exit(EXIT_SUCCESS);
                break;
           case 'x':
-               if(atoi(optarg)<0)
-                    exit(EXIT_FAILURE);
-               else
+               if(atoi(optarg) > 0)
                     geo.x = atoi(optarg) + 1;
 
                break;
           case 'y':
-               if(atoi(optarg)<0)
-                    exit(EXIT_FAILURE);
-               else
+               if(atoi(optarg) > 0)
                     geo.y = atoi(optarg) + 1;
                break;
-               case 's':
-                    option.second = 1;
-                    break;
-          case 't':
-               option.twelve = 1;
-               break;
-          case 'b':
-               option.keylock = 0;
-               break;
-          case 'c':
-               start();
-               set_center();
-               break;
+          case 's': option.second = True; break;
+          case 't': option.twelve = True; break;
+          case 'b': option.keylock = False; break;
+          case 'c': start(); set_center(); break;
           }
      }
 
      start();
      run();
 
-     for(;;)
+     while(running)
      {
           usleep(10000);
           check_key(option.keylock);
